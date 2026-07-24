@@ -1,0 +1,33 @@
+name: Daily QQQ LEAPS Trade Strategy
+
+on:
+  schedule:
+    # Runs at 14:30 UTC (9:30 AM EST / Market Open) Monday through Friday
+    - cron: '30 14 * * 1-5'
+  workflow_dispatch: # Allows manual triggering from GitHub UI
+
+jobs:
+  run-trading-strategy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run QQQ LEAPS Strategy
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: |
+          python prathimad_qqq_leaps_strategy.py
