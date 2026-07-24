@@ -16,12 +16,7 @@ Original file is located at
 # Setup
 """
 
-# Please change the following to your own PAPER api key and secret
-# or set them as environment variables (ALPACA_API_KEY, ALPACA_SECRET_KEY).
-# You can get them from https://alpaca.markets/
 
-api_key = os.environ.get('ALPACA_API_KEY')
-secret_key = os.environ.get('ALPACA_SECRET_KEY')
 
 #### We use paper environment for this example ####
 paper = True # Please do not modify this. This example is for paper trading only.
@@ -100,6 +95,13 @@ nest_asyncio.apply()
 
 # check version of alpaca-py
 alpaca.__version__
+
+# Please change the following to your own PAPER api key and secret
+# or set them as environment variables (ALPACA_API_KEY, ALPACA_SECRET_KEY).
+# You can get them from https://alpaca.markets/
+
+api_key = os.environ.get('ALPACA_API_KEY')
+secret_key = os.environ.get('ALPACA_SECRET_KEY')
 
 """# Helper Functions(No Execution)"""
 
