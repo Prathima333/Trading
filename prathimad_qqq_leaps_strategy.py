@@ -35,12 +35,7 @@ trade_api_wss = None
 data_api_url = None
 option_stream_data_wss = None
 
-# install alpaca-py if it is not available
-try:
-    import alpaca
-except ImportError:
-    !python3 -m pip install alpaca-py
-    import alpaca
+import alpaca
 
 import os, json, time
 from datetime import datetime, timedelta
@@ -267,7 +262,7 @@ def get_all_option_positions(symbol):
 underlying_symbol = "QQQ"
 
 if (get_all_option_positions(underlying_symbol)):
-  display("Already in QQQ. Not entering new position")
+  print("Already in QQQ. Not entering new position")
 else:
   selected_contract = select_high_interest_call_leap(underlying_symbol)
   place_order_with_exit_at_50pct_profit(selected_contract)
