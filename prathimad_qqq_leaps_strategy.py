@@ -20,8 +20,8 @@ Original file is located at
 # or set them as environment variables (ALPACA_API_KEY, ALPACA_SECRET_KEY).
 # You can get them from https://alpaca.markets/
 
-api_key = ''
-secret_key = ''
+api_key = os.environ.get('ALPACA_API_KEY')
+secret_key = os.environ.get('ALPACA_SECRET_KEY')
 
 #### We use paper environment for this example ####
 paper = True # Please do not modify this. This example is for paper trading only.
@@ -92,11 +92,7 @@ from alpaca.trading.enums import (
 )
 from alpaca.common.exceptions import APIError
 
-if api_key is None:
-    api_key = os.environ.get('ALPACA_API_KEY')
-
-if secret_key is None:
-    secret_key = os.environ.get('ALPACA_SECRET_KEY')
+# Environment variables ALPACA_API_KEY and ALPACA_SECRET_KEY are set above
 
 # to run async code in jupyter notebook
 import nest_asyncio
