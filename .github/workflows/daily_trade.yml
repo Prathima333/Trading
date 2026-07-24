@@ -2,8 +2,8 @@ name: Daily QQQ LEAPS Trade Strategy
 
 on:
   schedule:
-    # Runs at 14:30 UTC (9:30 AM EST / Market Open) Monday through Friday
-    - cron: '30 14 * * 1-5'
+    # Runs at 19:30 UTC (12:30 PM PT) every day
+    - cron: '30 19 * * *'
   workflow_dispatch: # Allows manual triggering from GitHub UI
 
 jobs:
