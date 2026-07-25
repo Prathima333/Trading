@@ -100,8 +100,26 @@ alpaca.__version__
 # or set them as environment variables (ALPACA_API_KEY, ALPACA_SECRET_KEY).
 # You can get them from https://alpaca.markets/
 
-api_key = os.environ.get('ALPACA_API_KEY')
-secret_key = os.environ.get('ALPACA_SECRET_KEY')
+api_key = ''
+secret_key = ''
+
+# Try to import Colab's userdata module
+try:
+    from google.colab import userdata
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+
+# Fetch the secret based on the environment
+if IN_COLAB:
+    print("Running in Colab: Fetching from userdata...")
+    api_key = userdata.get('ALPACA_API_KEY')
+    secret_key = userdata.get('ALPACA_SECRET_KEY')
+else:
+    print("Running outside Colab: Fetching from OS environment...")
+    # This will pull from the GitHub Actions YAML 'env' block
+    api_key = os.environ.get('ALPACA_API_KEY')
+    secret_key = os.environ.get('ALPACA_SECRET_KEY')
 
 """# Helper Functions(No Execution)"""
 
