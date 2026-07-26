@@ -203,27 +203,11 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
         bullish_regime = (today_price > today_sma200) and (today_sma200_slope > 0)
         entry_allowed = bullish_regime and (not is_overbought_cooldown_active)
 
-        # Condition 1: Portfolio allocation < 30%
-        if allocated_pct < 30.0 and entry_allowed:
-            target_pos_cost = total_equity * ((30.0 - allocated_pct) / 100.0)
-            strike = round(today_price * (1.0 - itm_discount), 2)
-            buy_opt_price = black_scholes_call(today_price, strike, 1.0)
-            qty = max(1, int(target_pos_cost // (buy_opt_price * 100)))
-            cost = buy_opt_price * 100 * qty
-
-            if cash >= cost:
-                cash -= cost
-                new_pos = Position(today_date, today_price, strike, buy_opt_price)
-                new_pos.contract_size = qty * 100
-                open_positions.append(new_pos)
-                print(f"[{today_date}] ENTRY (<30% Alloc -> Pos #1): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f} (Cost: ${cost:.2f})")
-
-        # Condition 2: Portfolio allocation < 40%
-        elif allocated_pct < 40.0:
-            ema_8_21_cross = (yest_ema8 < yest_ema21) and (today_ema8 > today_ema21)
-
-            if ema_8_21_cross and entry_allowed:
-                target_pos_cost = total_equity * 0.30
+        # Global Entry Guard: Evaluate allocation branches only if macro regime & overbought entry filters pass
+        if entry_allowed:
+            # Condition 1: Portfolio allocation < 30%
+            if allocated_pct < 30.0:
+                target_pos_cost = total_equity * ((30.0 - allocated_pct) / 100.0)
                 strike = round(today_price * (1.0 - itm_discount), 2)
                 buy_opt_price = black_scholes_call(today_price, strike, 1.0)
                 qty = max(1, int(target_pos_cost // (buy_opt_price * 100)))
@@ -234,25 +218,43 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
                     new_pos = Position(today_date, today_price, strike, buy_opt_price)
                     new_pos.contract_size = qty * 100
                     open_positions.append(new_pos)
-                    print(f"[{today_date}] ENTRY (<40% Alloc -> Pos #2 - 8/21 EMA Cross): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f}")
+                    print(f"[{today_date}] ENTRY (<30% Alloc -> Pos #1): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f} (Cost: ${cost:.2f})")
 
-        # Condition 3: Portfolio allocation < 70%
-        elif allocated_pct < 70.0:
-            ema_21_200_cross = (yest_ema21 < yest_sma200) and (today_ema21 > today_sma200)
+            # Condition 2: Portfolio allocation < 40%
+            elif allocated_pct < 40.0:
+                ema_8_21_cross = (yest_ema8 < yest_ema21) and (today_ema8 > today_ema21)
 
-            if ema_21_200_cross and entry_allowed:
-                target_pos_cost = total_equity * 0.30
-                strike = round(today_price * (1.0 - itm_discount), 2)
-                buy_opt_price = black_scholes_call(today_price, strike, 1.0)
-                qty = max(1, int(target_pos_cost // (buy_opt_price * 100)))
-                cost = buy_opt_price * 100 * qty
+                if ema_8_21_cross:
+                    target_pos_cost = total_equity * 0.30
+                    strike = round(today_price * (1.0 - itm_discount), 2)
+                    buy_opt_price = black_scholes_call(today_price, strike, 1.0)
+                    qty = max(1, int(target_pos_cost // (buy_opt_price * 100)))
+                    cost = buy_opt_price * 100 * qty
 
-                if cash >= cost:
-                    cash -= cost
-                    new_pos = Position(today_date, today_price, strike, buy_opt_price)
-                    new_pos.contract_size = qty * 100
-                    open_positions.append(new_pos)
-                    print(f"[{today_date}] ENTRY (<70% Alloc -> Pos #3 - 21/200 EMA Cross): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f}")
+                    if cash >= cost:
+                        cash -= cost
+                        new_pos = Position(today_date, today_price, strike, buy_opt_price)
+                        new_pos.contract_size = qty * 100
+                        open_positions.append(new_pos)
+                        print(f"[{today_date}] ENTRY (<40% Alloc -> Pos #2 - 8/21 EMA Cross): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f}")
+
+            # Condition 3: Portfolio allocation < 70%
+            elif allocated_pct < 70.0:
+                ema_21_200_cross = (yest_ema21 < yest_sma200) and (today_ema21 > today_sma200)
+
+                if ema_21_200_cross:
+                    target_pos_cost = total_equity * 0.30
+                    strike = round(today_price * (1.0 - itm_discount), 2)
+                    buy_opt_price = black_scholes_call(today_price, strike, 1.0)
+                    qty = max(1, int(target_pos_cost // (buy_opt_price * 100)))
+                    cost = buy_opt_price * 100 * qty
+
+                    if cash >= cost:
+                        cash -= cost
+                        new_pos = Position(today_date, today_price, strike, buy_opt_price)
+                        new_pos.contract_size = qty * 100
+                        open_positions.append(new_pos)
+                        print(f"[{today_date}] ENTRY (<70% Alloc -> Pos #3 - 21/200 EMA Cross): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f}")
 
         open_pos_value = sum(black_scholes_call(today_price, p.strike, max(0, 365 - (today_date - (p.entry_date.date() if hasattr(p.entry_date, "date") else p.entry_date)).days) / 365.0) * p.contract_size for p in open_positions)
         total_equity = cash + open_pos_value
