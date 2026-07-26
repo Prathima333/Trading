@@ -11,12 +11,14 @@ import numpy as np
 import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.historical.option import OptionHistoricalDataClient
 
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import Adjustment
 from alpaca.data.requests import (
     StockLatestTradeRequest,
     StockBarsRequest,
+    OptionLatestQuoteRequest,
 )
 from alpaca.trading.requests import (
     GetOptionContractsRequest,
@@ -112,13 +114,37 @@ def select_high_interest_ITM_call_leap(symbol, trade_client, data_client, itm_di
     return selected_contract
 
 
-def place_order_with_trailing_stop(selected_contract, trade_client, trail_percent=15.0):
+def calculate_position_quantity(selected_contract, trade_client, data_client, target_pct=0.30):
     """
-    Submits a market buy order for the selected ITM LEAP contract and places a 15% trailing stop exit order once filled.
+    Calculates exact number of contract units to buy based on deploying ~30% of total portfolio equity
+    using the real-time ask price of the selected option contract.
     """
+    acct = trade_client.get_account()
+    total_equity = float(acct.equity)
+    target_budget = total_equity * target_pct
+
+    # Fetch exact real-time quote for selected option contract
+    quote_req = OptionLatestQuoteRequest(symbol_or_symbols=[selected_contract.symbol])
+    quotes = data_client.get_option_latest_quote(quote_req)
+    contract_quote = quotes[selected_contract.symbol]
+
+    opt_price = float(contract_quote.ask_price) if float(contract_quote.ask_price) > 0 else float(contract_quote.bid_price)
+    contract_cost = opt_price * 100.0
+
+    qty = max(1, int(target_budget // contract_cost))
+    print(f"Position Sizing: Portfolio Equity = ${total_equity:,.2f} | 30% Target Budget = ${target_budget:,.2f} | Exact Contract Ask = ${opt_price:.2f} (Cost/unit = ${contract_cost:,.2f}) | Qty = {qty}")
+    return qty
+
+
+def place_order_with_trailing_stop(selected_contract, trade_client, data_client, target_pct=0.30, trail_percent=15.0):
+    """
+    Submits a market buy order for ~30% portfolio equity allocation (using exact contract quote) and places a 15% trailing stop exit order once filled.
+    """
+    qty = calculate_position_quantity(selected_contract, trade_client, data_client, target_pct=target_pct)
+
     place_order_req = MarketOrderRequest(
         symbol=selected_contract.symbol,
-        qty=1,
+        qty=qty,
         side=OrderSide.BUY,
         type=OrderType.MARKET,
         time_in_force=TimeInForce.DAY,
@@ -132,12 +158,12 @@ def place_order_with_trailing_stop(selected_contract, trade_client, trail_percen
         return None
 
     actual_fill_price = float(filled_order.filled_avg_price)
-    print(f"Order filled at: ${actual_fill_price}")
-    print(f"Setting {trail_percent}% trailing stop loss exit order...")
+    print(f"Order filled ({qty} units) at avg price: ${actual_fill_price:.2f}")
+    print(f"Setting {trail_percent}% trailing stop loss exit order for {qty} units...")
 
     exit_request = TrailingStopOrderRequest(
         symbol=filled_order.symbol,
-        qty=1,
+        qty=qty,
         side=OrderSide.SELL,
         trail_percent=trail_percent,
         time_in_force=TimeInForce.GTC,
@@ -229,6 +255,24 @@ def get_all_option_positions(symbol, trade_client):
     return qqq_option_positions
 
 
+def get_portfolio_allocation_pct(symbol, trade_client):
+    """
+    Calculates percentage of total account equity currently allocated to active option positions for symbol.
+    Returns (positions_list, total_equity, total_allocated_value, allocation_pct)
+    """
+    acct = trade_client.get_account()
+    total_equity = float(acct.equity)
+
+    positions = get_all_option_positions(symbol, trade_client)
+    total_allocated = sum(float(pos.market_value) for pos in positions)
+    
+    allocated_pct = (total_allocated / total_equity * 100.0) if total_equity > 0 else 0.0
+    print(f"Portfolio Allocation Analysis for {symbol}:")
+    print(f"  Account Equity: ${total_equity:,.2f} | Options Value: ${total_allocated:,.2f} | Allocated: {allocated_pct:.2f}%")
+
+    return positions, total_equity, total_allocated, allocated_pct
+
+
 def tv_ema(series: pd.Series, period: int) -> pd.Series:
     """TradingView standard Exponential Moving Average (EMA) with initial SMA seeding."""
     ema = np.zeros_like(series, dtype=float)
@@ -303,8 +347,3 @@ def check_price_above_200sma(symbol, data_client, trend_period=200):
     print(f"  Price > {trend_period} SMA: {is_above}")
 
     return is_above
-
-
-# Backwards compatibility aliases
-select_high_interest_ATM_call_leap = select_high_interest_ITM_call_leap
-place_order_with_exit_at_50pct_profit = place_order_with_trailing_stop

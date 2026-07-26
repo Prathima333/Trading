@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-QQQ LEAPS Strategy Backtesting Engine.
-Simulates daily execution of the trading strategy over historical market data.
+QQQ 75-Delta ITM LEAPS Strategy Backtesting Engine.
+Uses Portfolio Allocation % (0%, <40%, <70%) to scale positions.
 """
 
 import os
@@ -56,17 +56,17 @@ class Position:
         self.entry_price = entry_price
         self.strike = strike
         self.buy_opt_price = buy_opt_price
-        self.target_opt_price = round(buy_opt_price * 1.5, 2)
+        self.peak_opt_price = buy_opt_price
         self.initial_dte = initial_dte
         self.contract_size = 100
 
 
-def run_backtest(symbol="QQQ", lookback_days=1000, initial_capital=20000.0):
+def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_discount=0.07, trail_pct=15.0):
     """
-    Runs the LEAPS strategy backtest day-by-day over historical data.
+    Runs the ITM LEAPS strategy backtest day-by-day over historical data.
     """
-    print(f"=== Starting LEAPS Backtest for {symbol} ===")
-    print(f"Initial Capital: ${initial_capital:,.2f} | Lookback Window: {lookback_days} days\n")
+    print(f"=== Starting ITM LEAPS Backtest for {symbol} ===")
+    print(f"Initial Capital: ${initial_capital:,.2f} | Lookback Window: {lookback_days} days | ITM Discount: {itm_discount*100}% | Trailing Stop: {trail_pct}%\n")
 
     api_key, secret_key = get_alpaca_credentials()
     data_client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
@@ -112,17 +112,21 @@ def run_backtest(symbol="QQQ", lookback_days=1000, initial_capital=20000.0):
         # Step 1: Manage open positions (Runs once per day at market close)
         remaining_positions = []
         for pos in open_positions:
-            days_held = (today_date - pos.entry_date.date() if hasattr(pos.entry_date, 'date') else today_date - pos.entry_date).days
+            days_held = (today_date - (pos.entry_date.date() if hasattr(pos.entry_date, 'date') else pos.entry_date)).days
             current_dte = max(0, pos.initial_dte - days_held)
             T_years = current_dte / 365.0
 
             curr_opt_price = black_scholes_call(today_price, pos.strike, T_years)
+            pos.peak_opt_price = max(pos.peak_opt_price, curr_opt_price)
 
-            # Check Exit Condition A: 50% Profit Target
-            if curr_opt_price >= pos.target_opt_price:
+            gain_pct = (curr_opt_price / pos.buy_opt_price - 1.0)
+            is_trail_hit = (gain_pct > 0.40) and (curr_opt_price <= pos.peak_opt_price * (1.0 - trail_pct / 100.0))
+
+            # Exit Condition A: 15% Trailing Stop after +40% gain
+            if is_trail_hit:
                 sell_proceeds = curr_opt_price * pos.contract_size
                 pnl = (curr_opt_price - pos.buy_opt_price) * pos.contract_size
-                pnl_pct = (curr_opt_price / pos.buy_opt_price - 1.0) * 100
+                pnl_pct = gain_pct * 100
                 cash += sell_proceeds
 
                 closed_trades.append({
@@ -133,16 +137,16 @@ def run_backtest(symbol="QQQ", lookback_days=1000, initial_capital=20000.0):
                     'exit_opt_price': curr_opt_price,
                     'pnl': pnl,
                     'pnl_pct': pnl_pct,
-                    'reason': '50% Profit Target',
+                    'reason': f'{trail_pct}% Trailing Stop Exit',
                     'holding_days': days_held,
                 })
-                print(f"[{today_date}] EXIT (50% Profit): Sold Strike ${pos.strike} @ ${curr_opt_price:.2f} (Cost: ${pos.buy_opt_price:.2f}, PnL: +${pnl:.2f})")
+                print(f"[{today_date}] EXIT ({trail_pct}% Trailing Stop): Sold Strike ${pos.strike} @ ${curr_opt_price:.2f} (Cost: ${pos.buy_opt_price:.2f}, PnL: +${pnl:.2f})")
 
-            # Check Exit Condition B: 90 DTE Exit Rule
+            # Exit Condition B: 90 DTE Risk Exit
             elif current_dte <= 90:
                 sell_proceeds = curr_opt_price * pos.contract_size
                 pnl = (curr_opt_price - pos.buy_opt_price) * pos.contract_size
-                pnl_pct = (curr_opt_price / pos.buy_opt_price - 1.0) * 100
+                pnl_pct = gain_pct * 100
                 cash += sell_proceeds
 
                 closed_trades.append({
@@ -156,64 +160,77 @@ def run_backtest(symbol="QQQ", lookback_days=1000, initial_capital=20000.0):
                     'reason': '90 DTE Risk Exit',
                     'holding_days': days_held,
                 })
-                print(f"[{today_date}] EXIT (90 DTE Exit): Sold Strike ${pos.strike} @ ${curr_opt_price:.2f} (Cost: ${pos.buy_opt_price:.2f}, PnL: ${pnl:.2f})")
+                print(f"[{today_date}] EXIT (90 DTE Risk Exit): Sold Strike ${pos.strike} @ ${curr_opt_price:.2f} (Cost: ${pos.buy_opt_price:.2f}, PnL: ${pnl:.2f})")
 
             else:
                 remaining_positions.append(pos)
 
         open_positions = remaining_positions
 
-        # Step 2: Evaluate Daily Entry Signals (Runs once per day)
-        num_positions = len(open_positions)
-        price_above_200 = today_price > today_sma200
-
-        if num_positions == 0:
-            strike = round(today_price, 2)
-            buy_opt_price = black_scholes_call(today_price, strike, 1.0)
-            cost = buy_opt_price * 100
-
-            if cash >= cost:
-                cash -= cost
-                new_pos = Position(today_date, today_price, strike, buy_opt_price)
-                open_positions.append(new_pos)
-                print(f"[{today_date}] ENTRY (Pos #1): Bought ATM Call Strike ${strike} @ ${buy_opt_price:.2f} (Cost: ${cost:.2f})")
-
-        elif num_positions == 1:
-            ema_8_21_cross = (yest_ema8 < yest_ema21) and (today_ema8 > today_ema21)
-
-            if ema_8_21_cross and price_above_200:
-                strike = round(today_price, 2)
-                buy_opt_price = black_scholes_call(today_price, strike, 1.0)
-                cost = buy_opt_price * 100
-
-                if cash >= cost:
-                    cash -= cost
-                    new_pos = Position(today_date, today_price, strike, buy_opt_price)
-                    open_positions.append(new_pos)
-                    print(f"[{today_date}] ENTRY (Pos #2 - 8/21 EMA Cross): Bought Call Strike ${strike} @ ${buy_opt_price:.2f}")
-
-        elif num_positions == 2:
-            ema_21_200_cross = (yest_ema21 < yest_sma200) and (today_ema21 > today_sma200)
-
-            if ema_21_200_cross and price_above_200:
-                strike = round(today_price, 2)
-                buy_opt_price = black_scholes_call(today_price, strike, 1.0)
-                cost = buy_opt_price * 100
-
-                if cash >= cost:
-                    cash -= cost
-                    new_pos = Position(today_date, today_price, strike, buy_opt_price)
-                    open_positions.append(new_pos)
-                    print(f"[{today_date}] ENTRY (Pos #3 - 21/200 EMA Cross): Bought Call Strike ${strike} @ ${buy_opt_price:.2f}")
-
-        # Calculate daily portfolio equity
+        # Step 2: Calculate Portfolio Allocation %
         open_pos_value = 0.0
         for pos in open_positions:
-            days_held = (today_date - pos.entry_date.date() if hasattr(pos.entry_date, 'date') else today_date - pos.entry_date).days
+            days_held = (today_date - (pos.entry_date.date() if hasattr(pos.entry_date, 'date') else pos.entry_date)).days
             current_dte = max(0, pos.initial_dte - days_held)
             opt_val = black_scholes_call(today_price, pos.strike, current_dte / 365.0)
             open_pos_value += opt_val * pos.contract_size
 
+        total_equity = cash + open_pos_value
+        allocated_pct = (open_pos_value / total_equity * 100.0) if total_equity > 0 else 0.0
+        price_above_200 = today_price > today_sma200
+
+        target_pos_cost = total_equity * 0.30
+
+        # Condition 1: 0% portfolio allocated
+        if allocated_pct == 0 or len(open_positions) == 0:
+            strike = round(today_price * (1.0 - itm_discount), 2)
+            buy_opt_price = black_scholes_call(today_price, strike, 1.0)
+            qty = max(1, int(target_pos_cost // (buy_opt_price * 100)))
+            cost = buy_opt_price * 100 * qty
+
+            if cash >= cost:
+                cash -= cost
+                new_pos = Position(today_date, today_price, strike, buy_opt_price)
+                new_pos.contract_size = qty * 100
+                open_positions.append(new_pos)
+                print(f"[{today_date}] ENTRY (0% Alloc -> Pos #1): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f} (Cost: ${cost:.2f})")
+
+        # Condition 2: Portfolio allocation < 40%
+        elif allocated_pct < 40.0:
+            ema_8_21_cross = (yest_ema8 < yest_ema21) and (today_ema8 > today_ema21)
+
+            if ema_8_21_cross and price_above_200:
+                strike = round(today_price * (1.0 - itm_discount), 2)
+                buy_opt_price = black_scholes_call(today_price, strike, 1.0)
+                qty = max(1, int(target_pos_cost // (buy_opt_price * 100)))
+                cost = buy_opt_price * 100 * qty
+
+                if cash >= cost:
+                    cash -= cost
+                    new_pos = Position(today_date, today_price, strike, buy_opt_price)
+                    new_pos.contract_size = qty * 100
+                    open_positions.append(new_pos)
+                    print(f"[{today_date}] ENTRY (<40% Alloc -> Pos #2 - 8/21 EMA Cross): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f}")
+
+        # Condition 3: Portfolio allocation < 70%
+        elif allocated_pct < 70.0:
+            ema_21_200_cross = (yest_ema21 < yest_sma200) and (today_ema21 > today_sma200)
+
+            if ema_21_200_cross and price_above_200:
+                strike = round(today_price * (1.0 - itm_discount), 2)
+                buy_opt_price = black_scholes_call(today_price, strike, 1.0)
+                qty = max(1, int(target_pos_cost // (buy_opt_price * 100)))
+                cost = buy_opt_price * 100 * qty
+
+                if cash >= cost:
+                    cash -= cost
+                    new_pos = Position(today_date, today_price, strike, buy_opt_price)
+                    new_pos.contract_size = qty * 100
+                    open_positions.append(new_pos)
+                    print(f"[{today_date}] ENTRY (<70% Alloc -> Pos #3 - 21/200 EMA Cross): Bought Strike ${strike} ({qty} units) @ ${buy_opt_price:.2f}")
+
+        # Recalculate daily portfolio equity
+        open_pos_value = sum(black_scholes_call(today_price, p.strike, max(0, 365 - (today_date - (p.entry_date.date() if hasattr(p.entry_date, 'date') else p.entry_date)).days) / 365.0) * p.contract_size for p in open_positions)
         total_equity = cash + open_pos_value
         equity_curve.append(total_equity)
 
@@ -244,7 +261,7 @@ def run_backtest(symbol="QQQ", lookback_days=1000, initial_capital=20000.0):
     max_drawdown = abs(float(drawdown.min())) * 100
 
     print("\n" + "=" * 55)
-    print(f"               STRATEGY BACKTEST RESULTS             ")
+    print(f"         ITM LEAPS STRATEGY BACKTEST RESULTS         ")
     print("=" * 55)
     print(f"Initial Capital:         ${initial_capital:,.2f}")
     print(f"Final Equity:            ${final_equity:,.2f}")
@@ -262,4 +279,4 @@ def run_backtest(symbol="QQQ", lookback_days=1000, initial_capital=20000.0):
 
 
 if __name__ == "__main__":
-    run_backtest(symbol="QQQ", lookback_days=1000, initial_capital=20000.0)
+    run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_discount=0.07, trail_pct=15.0)
