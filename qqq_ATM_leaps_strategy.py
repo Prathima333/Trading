@@ -5,6 +5,7 @@ Uses Portfolio Allocation % (0%, <40%, <70%) to scale positions based on exact r
 Enforces Macro Regime Filter: Price > 200 SMA AND 200 SMA Sloping Upward.
 Enforces Peak Overbought Exit Rules: Price >= 1.18 * 200 SMA OR RSI(14) >= 75.
 Enforces Peak Overbought Entry Block & Resumption Thresholds (Price <= 1.12 * 200 SMA AND RSI <= 60).
+Enforces Market Hours Guard & Auto-Cancels Outstanding Buy Orders at Script Startup.
 """
 
 import nest_asyncio
@@ -14,6 +15,7 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 
 from credentials import get_alpaca_credentials
 from helpers import (
+    cancel_outstanding_buy_orders,
     close_positions_nearing_expiration,
     close_peak_overbought_positions,
     get_all_option_positions,
@@ -61,21 +63,24 @@ acct_config = trade_client.get_account_configurations()
 if __name__ == "__main__":
     underlying_symbol = "QQQ"
 
-    # Step 1: Execute 90 DTE exit rule first (close any option position with DTE < 90 days)
+    # Step 1: Cancel any outstanding open/queued limit buy orders at the beginning of script to prevent order buildup
+    cancel_outstanding_buy_orders(underlying_symbol, trade_client)
+
+    # Step 2: Execute 90 DTE exit rule (close any option position with DTE < 90 days)
     close_positions_nearing_expiration(underlying_symbol, trade_client, min_dte=90)
 
-    # Step 2: Execute Peak Overbought Exit Rule (Price >= 1.18 * 200 SMA OR RSI >= 75)
+    # Step 3: Execute Peak Overbought Exit Rule (Price >= 1.18 * 200 SMA OR RSI >= 75)
     close_peak_overbought_positions(underlying_symbol, trade_client, data_client, min_unrealized_pl_pct=30.0)
 
-    # Step 3: Fetch portfolio allocation percentage
+    # Step 4: Fetch portfolio allocation percentage
     positions, total_equity, total_allocated, allocated_pct = get_portfolio_allocation_pct(
         underlying_symbol, trade_client
     )
 
-    # Step 4: Check Macro Bullish Trend Regime (Price > 200 SMA AND 200 SMA Sloping Upward)
+    # Step 5: Check Macro Bullish Trend Regime (Price > 200 SMA AND 200 SMA Sloping Upward)
     bullish_regime = check_price_above_200sma(underlying_symbol, data_client, trend_period=200, slope_lookback=20, require_upward_slope=True)
 
-    # Step 5: Check Peak Overbought Entry Block & Resumption Filter
+    # Step 6: Check Peak Overbought Entry Block & Resumption Filter
     entry_allowed, is_overbought, ratio_200sma, today_rsi = check_overbought_entry_allowed(underlying_symbol, data_client)
 
     # Global Entry Guard: Check macro regime & overbought filters before evaluating allocation branches

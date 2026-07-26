@@ -36,6 +36,47 @@ from alpaca.trading.enums import (
 )
 
 
+def is_market_open(trade_client):
+    """
+    Checks Alpaca Market Clock API. Returns True if market is currently open, False if closed.
+    """
+    try:
+        clock = trade_client.get_clock()
+        return bool(clock.is_open)
+    except Exception as e:
+        print(f"Warning: Could not fetch market clock ({e}). Defaulting to False.")
+        return False
+
+
+def cancel_outstanding_buy_orders(symbol, trade_client):
+    """
+    Cancels all open or queued limit buy orders for options of symbol at the start of execution
+    to prevent duplicate order accumulation.
+    """
+    print(f"Checking for outstanding open buy orders for {symbol} options...")
+    try:
+        orders = trade_client.get_orders()
+        canceled_count = 0
+        for order in orders:
+            is_symbol_match = order.symbol.startswith(symbol)
+            is_buy = order.side == OrderSide.BUY
+            is_open = order.status.name in ['NEW', 'ACCEPTED', 'PENDING_NEW', 'HELD']
+
+            if is_symbol_match and is_buy and is_open:
+                print(f"  Canceling open buy order {order.id} for {order.symbol} ({order.qty} units)...")
+                trade_client.cancel_order_by_id(order.id)
+                canceled_count += 1
+
+        if canceled_count == 0:
+            print(f"No outstanding buy orders found for {symbol}.")
+        else:
+            print(f"Successfully canceled {canceled_count} outstanding buy order(s).")
+        return canceled_count
+    except Exception as e:
+        print(f"Error canceling outstanding buy orders: {e}")
+        return 0
+
+
 def wait_for_order_fill(order_id, trade_client, max_attempts=5, delay_seconds=1):
     """
     Reusable Helper Function: Polls and waits until an order reaches 'FILLED' status or until max_attempts timeout.
@@ -140,8 +181,12 @@ def calculate_position_quantity(selected_contract, trade_client, data_client, ta
 def place_order_with_trailing_stop(selected_contract, trade_client, data_client, target_pct=0.30, trail_percent=15.0):
     """
     Submits a limit buy order (at ask price) for ~30% portfolio equity allocation and places a 15% trailing stop exit order once filled.
-    Supports submission both during market hours and outside market hours.
+    Submits buy orders ONLY during open market hours to prevent order accumulation outside market hours.
     """
+    if not is_market_open(trade_client):
+        print(f"Market is currently CLOSED. Skipping new buy order submission for {selected_contract.symbol} to prevent queued order buildup.")
+        return None
+
     qty, opt_price = calculate_position_quantity(selected_contract, trade_client, data_client, target_pct=target_pct)
 
     place_order_req = LimitOrderRequest(
@@ -172,7 +217,7 @@ def place_order_with_trailing_stop(selected_contract, trade_client, data_client,
         print("Trailing stop exit order successfully placed and active!")
         return exit_order
     else:
-        print(f"Order status for {selected_contract.symbol}: {filled_order.status.name} (queued for execution when market opens).")
+        print(f"Order status for {selected_contract.symbol}: {filled_order.status.name}.")
         return filled_order
 
 
