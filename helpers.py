@@ -36,7 +36,7 @@ from alpaca.trading.enums import (
 )
 
 
-def wait_for_order_fill(order_id, trade_client, max_attempts=30, delay_seconds=1):
+def wait_for_order_fill(order_id, trade_client, max_attempts=5, delay_seconds=1):
     """
     Reusable Helper Function: Polls and waits until an order reaches 'FILLED' status or until max_attempts timeout.
     Returns the updated order object.
@@ -118,6 +118,7 @@ def calculate_position_quantity(selected_contract, trade_client, data_client, ta
     """
     Calculates exact number of contract units to buy based on deploying ~30% of total portfolio equity
     using the real-time ask price of the selected option contract.
+    Returns (qty, opt_price)
     """
     acct = trade_client.get_account()
     total_equity = float(acct.equity)
@@ -132,46 +133,47 @@ def calculate_position_quantity(selected_contract, trade_client, data_client, ta
     contract_cost = opt_price * 100.0
 
     qty = max(1, int(target_budget // contract_cost))
-    print(f"Position Sizing: Portfolio Equity = ${total_equity:,.2f} | 30% Target Budget = ${target_budget:,.2f} | Exact Contract Ask = ${opt_price:.2f} (Cost/unit = ${contract_cost:,.2f}) | Qty = {qty}")
-    return qty
+    print(f"Position Sizing: Portfolio Equity = ${total_equity:,.2f} | Target Budget ({target_pct*100:.1f}%) = ${target_budget:,.2f} | Contract Ask = ${opt_price:.2f} (Cost/unit = ${contract_cost:,.2f}) | Qty = {qty}")
+    return qty, opt_price
 
 
 def place_order_with_trailing_stop(selected_contract, trade_client, data_client, target_pct=0.30, trail_percent=15.0):
     """
-    Submits a market buy order for ~30% portfolio equity allocation (using exact contract quote) and places a 15% trailing stop exit order once filled.
+    Submits a limit buy order (at ask price) for ~30% portfolio equity allocation and places a 15% trailing stop exit order once filled.
+    Supports submission both during market hours and outside market hours.
     """
-    qty = calculate_position_quantity(selected_contract, trade_client, data_client, target_pct=target_pct)
+    qty, opt_price = calculate_position_quantity(selected_contract, trade_client, data_client, target_pct=target_pct)
 
-    place_order_req = MarketOrderRequest(
+    place_order_req = LimitOrderRequest(
         symbol=selected_contract.symbol,
         qty=qty,
         side=OrderSide.BUY,
-        type=OrderType.MARKET,
-        time_in_force=TimeInForce.DAY,
+        limit_price=opt_price,
+        time_in_force=TimeInForce.GTC,
     )
     place_order_res = trade_client.submit_order(place_order_req)
+    print(f"Submitted limit buy order for {selected_contract.symbol} ({qty} units @ ${opt_price:.2f}). Order ID: {place_order_res.id}")
 
     filled_order = wait_for_order_fill(place_order_res.id, trade_client)
 
-    if filled_order.status.name != 'FILLED':
-        print(f"Warning: Buy order for {selected_contract.symbol} not filled (Status: {filled_order.status.name}).")
-        return None
+    if filled_order.status.name == 'FILLED':
+        actual_fill_price = float(filled_order.filled_avg_price)
+        print(f"Order filled ({qty} units) at avg price: ${actual_fill_price:.2f}")
+        print(f"Setting {trail_percent}% trailing stop loss exit order for {qty} units...")
 
-    actual_fill_price = float(filled_order.filled_avg_price)
-    print(f"Order filled ({qty} units) at avg price: ${actual_fill_price:.2f}")
-    print(f"Setting {trail_percent}% trailing stop loss exit order for {qty} units...")
-
-    exit_request = TrailingStopOrderRequest(
-        symbol=filled_order.symbol,
-        qty=qty,
-        side=OrderSide.SELL,
-        trail_percent=trail_percent,
-        time_in_force=TimeInForce.GTC,
-    )
-
-    exit_order = trade_client.submit_order(exit_request)
-    print("Trailing stop exit order successfully placed and active!")
-    return exit_order
+        exit_request = TrailingStopOrderRequest(
+            symbol=filled_order.symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            trail_percent=trail_percent,
+            time_in_force=TimeInForce.GTC,
+        )
+        exit_order = trade_client.submit_order(exit_request)
+        print("Trailing stop exit order successfully placed and active!")
+        return exit_order
+    else:
+        print(f"Order status for {selected_contract.symbol}: {filled_order.status.name} (queued for execution when market opens).")
+        return filled_order
 
 
 def close_positions_nearing_expiration(symbol, trade_client, min_dte=90):

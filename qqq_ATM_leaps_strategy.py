@@ -64,13 +64,13 @@ if __name__ == "__main__":
     )
 
     # Condition 1: 0% portfolio allocated to QQQ options
-    if allocated_pct == 0 or len(positions) == 0:
+    if allocated_pct < 30.0:
         print("0% portfolio allocated to QQQ options. Entering 1st ITM LEAP position (~30% portfolio equity)...")
         selected_contract = select_high_interest_ITM_call_leap(
             underlying_symbol, trade_client, data_client, itm_discount_pct=0.07
         )
         place_order_with_trailing_stop(
-            selected_contract, trade_client, option_data_client, target_pct=0.30, trail_percent=15.0
+            selected_contract, trade_client, option_data_client, target_pct=(30-allocated_pct)/100, trail_percent=15.0
         )
 
     # Condition 2: Portfolio allocation < 40%
