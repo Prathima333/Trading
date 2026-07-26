@@ -30,4 +30,4 @@ jobs:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         run: |
-          python prathimad_qqq_leaps_strategy.py
+          python qqq_ATM_leaps_strategy.py

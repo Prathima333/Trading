@@ -1,0 +1,6 @@
+# Environment variables file containing sensitive credentials
+.env
+
+# Python cache & bytecode
+__pycache__/
+*.pyc
