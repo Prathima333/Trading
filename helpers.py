@@ -235,6 +235,47 @@ def close_positions_nearing_expiration(symbol, trade_client, min_dte=90):
         print(f"No option positions with DTE < {min_dte} days were found.")
 
 
+def close_peak_overbought_positions(symbol, trade_client, data_client, min_unrealized_pl_pct=30.0):
+    """
+    Peak Exit Rule: If market is overextended (Price >= 1.18 * 200 SMA OR RSI >= 75) AND position has > 30% profit,
+    harvests profits immediately near the peak.
+    """
+    is_overbought, today_price, ratio_200sma, today_rsi = check_peak_overbought_exit(symbol, data_client)
+
+    if not is_overbought:
+        return 0
+
+    print(f"Market peak overbought condition detected for {symbol} (Ratio: {ratio_200sma:.2f}x, RSI: {today_rsi:.1f})! Checking profitable positions to harvest...")
+
+    all_positions = trade_client.get_all_positions()
+    option_positions = [
+        pos for pos in all_positions
+        if pos.asset_class == AssetClass.US_OPTION and pos.symbol.startswith(symbol)
+    ]
+
+    closed_count = 0
+    for pos in option_positions:
+        unrealized_plpc = float(pos.unrealized_plpc) * 100.0 if hasattr(pos, 'unrealized_plpc') else 0.0
+        if unrealized_plpc >= min_unrealized_pl_pct:
+            print(f"Harvesting peak profits on position {pos.symbol} (Unrealized PnL: +{unrealized_plpc:.1f}% >= +{min_unrealized_pl_pct:.1f}%)...")
+            try:
+                orders = trade_client.get_orders()
+                for order in orders:
+                    if order.symbol == pos.symbol:
+                        print(f"  Canceling open trailing stop order {order.id} for {pos.symbol}...")
+                        trade_client.cancel_order_by_id(order.id)
+
+                close_order = trade_client.close_position(pos.symbol)
+                print(f"Submitted peak profit close order for {pos.symbol} (ID: {close_order.id}). Waiting for fill...")
+                filled_order = wait_for_order_fill(close_order.id, trade_client)
+                print(f"Peak profit harvest order status for {pos.symbol}: {filled_order.status.name}.")
+                closed_count += 1
+            except Exception as e:
+                print(f"Error harvesting peak profit for position {pos.symbol}: {e}")
+
+    return closed_count
+
+
 def get_all_option_positions(symbol, trade_client):
     """
     Fetches all active option positions for the given underlying symbol.
@@ -358,3 +399,51 @@ def check_price_above_200sma(symbol, data_client, trend_period=200, slope_lookba
     print(f"  Bullish Regime Active: {is_bullish_regime}")
 
     return is_bullish_regime
+
+
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Computes standard Relative Strength Index (RSI)."""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def check_peak_overbought_exit(symbol, data_client, stretch_ratio=1.18, rsi_threshold=75.0):
+    """
+    Peak Exit Rule: Checks if symbol close price is overextended (>= 18% above 200-day SMA) OR RSI >= 75.
+    Returns (is_overbought_peak, today_price, ratio_200sma, today_rsi)
+    """
+    start_date = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=450)
+    request_params = StockBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame.Day,
+        start=start_date,
+        adjustment=Adjustment.ALL,
+    )
+    bars = data_client.get_stock_bars(request_params)
+
+    df = bars.df
+    close_series = df.loc[symbol]['close'] if isinstance(df.index, pd.MultiIndex) else df['close']
+
+    sma_200 = close_series.rolling(window=200).mean()
+    rsi_series = compute_rsi(close_series, period=14)
+
+    today_price = float(close_series.iloc[-1])
+    today_200sma = float(sma_200.iloc[-1])
+    today_rsi = float(rsi_series.iloc[-1])
+
+    ratio_200sma = today_price / today_200sma if today_200sma > 0 else 1.0
+
+    is_stretched = ratio_200sma >= stretch_ratio
+    is_rsi_overbought = today_rsi >= rsi_threshold
+
+    is_overbought_peak = is_stretched or is_rsi_overbought
+
+    print(f"Peak Overbought Analysis for {symbol}:")
+    print(f"  Price: ${today_price:.2f} | 200 SMA: ${today_200sma:.2f} | Ratio: {ratio_200sma:.2f}x (Threshold: >={stretch_ratio:.2f}x)")
+    print(f"  14-Day RSI: {today_rsi:.1f} (Threshold: >={rsi_threshold:.1f})")
+    print(f"  Peak Overbought Signal: {is_overbought_peak}")
+
+    return is_overbought_peak, today_price, ratio_200sma, today_rsi

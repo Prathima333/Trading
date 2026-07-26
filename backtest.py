@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Backtester for ITM LEAPS Strategy with Portfolio Allocation % Branching and 200 SMA Upward Slope Macro Filter.
+Backtester for ITM LEAPS Strategy with Portfolio Allocation % Branching,
+200 SMA Upward Slope Macro Filter, and Peak Overbought Exit Rules (Price >= 1.18 * 200 SMA OR RSI >= 75).
 """
 
 import math
@@ -15,7 +16,7 @@ from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import Adjustment
 
 from credentials import get_alpaca_credentials
-from helpers import tv_ema
+from helpers import tv_ema, compute_rsi
 
 
 def black_scholes_call(S, K, T, r=0.04, sigma=0.22):
@@ -55,7 +56,7 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
     data_client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
 
     end_date = datetime.now(tz=ZoneInfo("America/New_York"))
-    start_date = end_date - timedelta(days=lookback_days + 400)
+    start_date = end_date - timedelta(days=lookback_days + 450)
 
     request_params = StockBarsRequest(
         symbol_or_symbols=[symbol],
@@ -72,6 +73,7 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
     ema21 = tv_ema(close_series, 21)
     sma200 = close_series.rolling(window=200).mean()
     sma200_slope = sma200.diff(20)
+    rsi_series = compute_rsi(close_series, period=14)
 
     cash = initial_capital
     open_positions = []
@@ -89,6 +91,7 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
         today_ema21 = float(ema21.iloc[curr_i])
         today_sma200 = float(sma200.iloc[curr_i])
         today_sma200_slope = float(sma200_slope.iloc[curr_i]) if not math.isnan(sma200_slope.iloc[curr_i]) else 0.0
+        today_rsi = float(rsi_series.iloc[curr_i]) if not math.isnan(rsi_series.iloc[curr_i]) else 50.0
 
         yest_ema8 = float(ema8.iloc[curr_i - 1])
         yest_ema21 = float(ema21.iloc[curr_i - 1])
@@ -106,6 +109,9 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
 
             gain_pct = (curr_opt_price / pos.buy_opt_price - 1.0)
             is_trail_hit = (gain_pct > 0.40) and (curr_opt_price <= pos.peak_opt_price * (1.0 - trail_pct / 100.0))
+
+            # Peak Overbought Exit Rule: Price >= 1.18 * 200 SMA OR RSI >= 75 (when in profit > 30%)
+            is_peak_exit = (gain_pct > 0.30) and ((today_price / today_sma200 >= 1.18) or (today_rsi >= 75.0))
 
             # Exit Condition A: 15% Trailing Stop after +40% gain
             if is_trail_hit:
@@ -127,7 +133,27 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
                 })
                 print(f"[{today_date}] EXIT ({trail_pct}% Trailing Stop): Sold Strike ${pos.strike} @ ${curr_opt_price:.2f} (Cost: ${pos.buy_opt_price:.2f}, PnL: +${pnl:.2f})")
 
-            # Exit Condition B: 90 DTE Risk Exit
+            # Exit Condition B: Peak Overbought Profit Harvest Exit
+            elif is_peak_exit:
+                sell_proceeds = curr_opt_price * pos.contract_size
+                pnl = (curr_opt_price - pos.buy_opt_price) * pos.contract_size
+                pnl_pct = gain_pct * 100
+                cash += sell_proceeds
+
+                closed_trades.append({
+                    "entry_date": pos.entry_date,
+                    "exit_date": today_date,
+                    "strike": pos.strike,
+                    "buy_opt_price": pos.buy_opt_price,
+                    "exit_opt_price": curr_opt_price,
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
+                    "reason": "Peak Overbought Harvest Exit",
+                    "holding_days": days_held,
+                })
+                print(f"[{today_date}] EXIT (Peak Overbought Harvest): Sold Strike ${pos.strike} @ ${curr_opt_price:.2f} (Cost: ${pos.buy_opt_price:.2f}, PnL: +${pnl:.2f})")
+
+            # Exit Condition C: 90 DTE Risk Exit
             elif current_dte <= 90:
                 sell_proceeds = curr_opt_price * pos.contract_size
                 pnl = (curr_opt_price - pos.buy_opt_price) * pos.contract_size

@@ -3,6 +3,7 @@
 QQQ LEAPS Trading Strategy Main Execution Script.
 Uses Portfolio Allocation % (0%, <40%, <70%) to scale positions based on exact real-time option quotes.
 Enforces Macro Regime Filter: Price > 200 SMA AND 200 SMA Sloping Upward.
+Enforces Peak Overbought Exit Rules: Price >= 1.18 * 200 SMA OR RSI(14) >= 75.
 """
 
 import nest_asyncio
@@ -13,6 +14,7 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 from credentials import get_alpaca_credentials
 from helpers import (
     close_positions_nearing_expiration,
+    close_peak_overbought_positions,
     get_all_option_positions,
     get_portfolio_allocation_pct,
     select_high_interest_ITM_call_leap,
@@ -20,6 +22,7 @@ from helpers import (
     get_latest_price,
     check_bullish_ema_crossover,
     check_price_above_200sma,
+    check_peak_overbought_exit,
 )
 
 # Enable async code support in notebook environments
@@ -59,12 +62,15 @@ if __name__ == "__main__":
     # Step 1: Execute 90 DTE exit rule first (close any option position with DTE < 90 days)
     close_positions_nearing_expiration(underlying_symbol, trade_client, min_dte=90)
 
-    # Step 2: Fetch portfolio allocation percentage
+    # Step 2: Execute Peak Overbought Exit Rule (Price >= 1.18 * 200 SMA OR RSI >= 75)
+    close_peak_overbought_positions(underlying_symbol, trade_client, data_client, min_unrealized_pl_pct=30.0)
+
+    # Step 3: Fetch portfolio allocation percentage
     positions, total_equity, total_allocated, allocated_pct = get_portfolio_allocation_pct(
         underlying_symbol, trade_client
     )
 
-    # Step 3: Check Macro Bullish Trend Regime (Price > 200 SMA AND 200 SMA Sloping Upward)
+    # Step 4: Check Macro Bullish Trend Regime (Price > 200 SMA AND 200 SMA Sloping Upward)
     bullish_regime = check_price_above_200sma(underlying_symbol, data_client, trend_period=200, slope_lookback=20, require_upward_slope=True)
 
     # Condition 1: Portfolio allocation < 30%
