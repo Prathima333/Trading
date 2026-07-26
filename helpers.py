@@ -7,10 +7,15 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 
-from alpaca.data.requests import StockLatestTradeRequest
+from alpaca.data.timeframe import TimeFrame
+from alpaca.data.requests import (
+    StockLatestTradeRequest,
+    StockBarsRequest,
+)
 from alpaca.trading.requests import (
     GetOptionContractsRequest,
     MarketOrderRequest,
@@ -146,3 +151,42 @@ def get_all_option_positions(symbol, trade_client):
         print(f"No active {symbol} option positions found in the account.")
 
     return qqq_option_positions
+
+
+def check_bullish_ema_crossover(symbol, data_client, fast_period=8, slow_period=21):
+    """
+    Checks if a bullish EMA crossover occurred for the given symbol.
+    Returns True if today's fast_period EMA is > slow_period EMA while yesterday's fast_period EMA was < slow_period EMA.
+    """
+    start_date = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=120)
+    request_params = StockBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame.Day,
+        start=start_date,
+    )
+    bars = data_client.get_stock_bars(request_params)
+
+    df = bars.df
+    if isinstance(df.index, pd.MultiIndex):
+        close_series = df.loc[symbol]['close']
+    else:
+        close_series = df['close']
+
+    ema_fast = close_series.ewm(span=fast_period, adjust=False).mean()
+    ema_slow = close_series.ewm(span=slow_period, adjust=False).mean()
+
+    today_fast = float(ema_fast.iloc[-1])
+    today_slow = float(ema_slow.iloc[-1])
+    yesterday_fast = float(ema_fast.iloc[-2])
+    yesterday_slow = float(ema_slow.iloc[-2])
+
+    # Bullish crossover: 9 EMA < 21 EMA yesterday AND 9 EMA > 21 EMA today
+    crossover = (yesterday_fast < yesterday_slow) and (today_fast > today_slow)
+
+    print(f"EMA Analysis for {symbol} ({fast_period} EMA vs {slow_period} EMA):")
+    print(f"  Yesterday: {fast_period} EMA = ${yesterday_fast:.2f}, {slow_period} EMA = ${yesterday_slow:.2f}")
+    print(f"  Today:     {fast_period} EMA = ${today_fast:.2f}, {slow_period} EMA = ${today_slow:.2f}")
+    print(f"  Bullish Crossover: {crossover}")
+
+    return crossover
+
