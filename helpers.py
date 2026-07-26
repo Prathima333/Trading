@@ -447,3 +447,45 @@ def check_peak_overbought_exit(symbol, data_client, stretch_ratio=1.18, rsi_thre
     print(f"  Peak Overbought Signal: {is_overbought_peak}")
 
     return is_overbought_peak, today_price, ratio_200sma, today_rsi
+
+
+def check_overbought_entry_allowed(symbol, data_client, max_stretch_ratio=1.18, max_rsi=75.0, resume_stretch_ratio=1.12, resume_rsi=60.0):
+    """
+    Peak Overbought Entry Block & Resumption Rule:
+    Blocks new option entries if QQQ is overbought (Price >= 1.18 * 200 SMA OR RSI >= 75).
+    Resumes new entries when QQQ cools down (Price <= 1.12 * 200 SMA AND RSI <= 60).
+    Returns (entry_allowed, is_cooldown_active, ratio_200sma, today_rsi)
+    """
+    start_date = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=450)
+    request_params = StockBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame.Day,
+        start=start_date,
+        adjustment=Adjustment.ALL,
+    )
+    bars = data_client.get_stock_bars(request_params)
+
+    df = bars.df
+    close_series = df.loc[symbol]['close'] if isinstance(df.index, pd.MultiIndex) else df['close']
+
+    sma_200 = close_series.rolling(window=200).mean()
+    rsi_series = compute_rsi(close_series, period=14)
+
+    today_price = float(close_series.iloc[-1])
+    today_200sma = float(sma_200.iloc[-1])
+    today_rsi = float(rsi_series.iloc[-1])
+
+    ratio_200sma = today_price / today_200sma if today_200sma > 0 else 1.0
+
+    # Overbought entry block check
+    is_overbought = (ratio_200sma >= max_stretch_ratio) or (today_rsi >= max_rsi)
+    is_cooled_down = (ratio_200sma <= resume_stretch_ratio) and (today_rsi <= resume_rsi)
+
+    entry_allowed = not is_overbought
+
+    print(f"Overbought Entry Filter Analysis for {symbol}:")
+    print(f"  Price / 200 SMA Ratio: {ratio_200sma:.2f}x (Block: >={max_stretch_ratio:.2f}x, Resume: <={resume_stretch_ratio:.2f}x)")
+    print(f"  14-Day RSI: {today_rsi:.1f} (Block: >={max_rsi:.1f}, Resume: <={resume_rsi:.1f})")
+    print(f"  Entry Allowed: {entry_allowed}")
+
+    return entry_allowed, is_overbought, ratio_200sma, today_rsi

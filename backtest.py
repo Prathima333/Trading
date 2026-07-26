@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Backtester for ITM LEAPS Strategy with Portfolio Allocation % Branching,
-200 SMA Upward Slope Macro Filter, and Peak Overbought Exit Rules (Price >= 1.18 * 200 SMA OR RSI >= 75).
+200 SMA Upward Slope Macro Filter, Peak Overbought Exit Rules (Price >= 1.18 * 200 SMA OR RSI >= 75),
+and Peak Overbought Entry Block & Resumption Thresholds (Price <= 1.12 * 200 SMA AND RSI <= 60).
 """
 
 import math
@@ -79,6 +80,7 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
     open_positions = []
     closed_trades = []
     equity_curve = []
+    is_overbought_cooldown_active = False
 
     start_idx = 201
     dates = close_series.index[start_idx:]
@@ -97,6 +99,16 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
         yest_ema21 = float(ema21.iloc[curr_i - 1])
         yest_sma200 = float(sma200.iloc[curr_i - 1])
 
+        ratio_200sma = today_price / today_sma200 if today_sma200 > 0 else 1.0
+
+        # Overbought entry block trigger
+        if ratio_200sma >= 1.18 or today_rsi >= 75.0:
+            is_overbought_cooldown_active = True
+
+        # Resumption threshold trigger
+        if ratio_200sma <= 1.12 and today_rsi <= 60.0:
+            is_overbought_cooldown_active = False
+
         # Step 1: Manage open positions
         remaining_positions = []
         for pos in open_positions:
@@ -111,7 +123,7 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
             is_trail_hit = (gain_pct > 0.40) and (curr_opt_price <= pos.peak_opt_price * (1.0 - trail_pct / 100.0))
 
             # Peak Overbought Exit Rule: Price >= 1.18 * 200 SMA OR RSI >= 75 (when in profit > 30%)
-            is_peak_exit = (gain_pct > 0.30) and ((today_price / today_sma200 >= 1.18) or (today_rsi >= 75.0))
+            is_peak_exit = (gain_pct > 0.30) and (ratio_200sma >= 1.18 or today_rsi >= 75.0)
 
             # Exit Condition A: 15% Trailing Stop after +40% gain
             if is_trail_hit:
@@ -189,9 +201,10 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
         total_equity = cash + open_pos_value
         allocated_pct = (open_pos_value / total_equity * 100.0) if total_equity > 0 else 0.0
         bullish_regime = (today_price > today_sma200) and (today_sma200_slope > 0)
+        entry_allowed = bullish_regime and (not is_overbought_cooldown_active)
 
         # Condition 1: Portfolio allocation < 30%
-        if allocated_pct < 30.0 and bullish_regime:
+        if allocated_pct < 30.0 and entry_allowed:
             target_pos_cost = total_equity * ((30.0 - allocated_pct) / 100.0)
             strike = round(today_price * (1.0 - itm_discount), 2)
             buy_opt_price = black_scholes_call(today_price, strike, 1.0)
@@ -209,7 +222,7 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
         elif allocated_pct < 40.0:
             ema_8_21_cross = (yest_ema8 < yest_ema21) and (today_ema8 > today_ema21)
 
-            if ema_8_21_cross and bullish_regime:
+            if ema_8_21_cross and entry_allowed:
                 target_pos_cost = total_equity * 0.30
                 strike = round(today_price * (1.0 - itm_discount), 2)
                 buy_opt_price = black_scholes_call(today_price, strike, 1.0)
@@ -227,7 +240,7 @@ def run_backtest(symbol="QQQ", lookback_days=1825, initial_capital=20000.0, itm_
         elif allocated_pct < 70.0:
             ema_21_200_cross = (yest_ema21 < yest_sma200) and (today_ema21 > today_sma200)
 
-            if ema_21_200_cross and bullish_regime:
+            if ema_21_200_cross and entry_allowed:
                 target_pos_cost = total_equity * 0.30
                 strike = round(today_price * (1.0 - itm_discount), 2)
                 buy_opt_price = black_scholes_call(today_price, strike, 1.0)
