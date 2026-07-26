@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Helper functions for Alpaca options trading strategy.
+Helper functions for Alpaca ITM LEAPS options trading strategy.
 """
 
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import Adjustment
 from alpaca.data.requests import (
     StockLatestTradeRequest,
     StockBarsRequest,
@@ -20,6 +22,7 @@ from alpaca.trading.requests import (
     GetOptionContractsRequest,
     MarketOrderRequest,
     LimitOrderRequest,
+    TrailingStopOrderRequest,
 )
 from alpaca.trading.enums import (
     AssetStatus,
@@ -31,6 +34,20 @@ from alpaca.trading.enums import (
 )
 
 
+def wait_for_order_fill(order_id, trade_client, max_attempts=30, delay_seconds=1):
+    """
+    Reusable Helper Function: Polls and waits until an order reaches 'FILLED' status or until max_attempts timeout.
+    Returns the updated order object.
+    """
+    attempts = 0
+    filled_order = trade_client.get_order_by_id(order_id)
+    while filled_order.status.name != 'FILLED' and attempts < max_attempts:
+        time.sleep(delay_seconds)
+        attempts += 1
+        filled_order = trade_client.get_order_by_id(order_id)
+    return filled_order
+
+
 def get_latest_price(symbol, data_client):
     """
     Fetches the latest trade price for a given stock symbol using StockHistoricalDataClient.
@@ -40,17 +57,18 @@ def get_latest_price(symbol, data_client):
     return latest_trade[symbol].price
 
 
-def select_high_interest_ATM_call_leap(symbol, trade_client, data_client):
+def select_high_interest_ITM_call_leap(symbol, trade_client, data_client, itm_discount_pct=0.07):
     """
-    Selects the American call LEAP contract (300-400 days out, ~1% ITM/ATM) with the highest open interest.
+    Selects the 70-75 Delta ITM American call LEAP contract (300-400 days out, ~7% ITM strike) with highest open interest.
     """
     now = datetime.now(tz=ZoneInfo("America/New_York"))
     day300 = now + timedelta(days=300)
     day400 = now + timedelta(days=400)
 
     latest_price = get_latest_price(symbol, data_client)
-    min_strike = round(latest_price * 0.99, 2)
-    max_strike = round(latest_price * 1.01, 2)
+    target_strike = latest_price * (1.0 - itm_discount_pct)
+    min_strike = round(target_strike * 0.98, 2)
+    max_strike = round(target_strike * 1.02, 2)
 
     req = GetOptionContractsRequest(
         underlying_symbols=[symbol],
@@ -94,9 +112,9 @@ def select_high_interest_ATM_call_leap(symbol, trade_client, data_client):
     return selected_contract
 
 
-def place_order_with_exit_at_50pct_profit(selected_contract, trade_client):
+def place_order_with_trailing_stop(selected_contract, trade_client, trail_percent=15.0):
     """
-    Submits a market buy order for the selected contract and places a 50% take-profit limit sell order once filled.
+    Submits a market buy order for the selected ITM LEAP contract and places a 15% trailing stop exit order once filled.
     """
     place_order_req = MarketOrderRequest(
         symbol=selected_contract.symbol,
@@ -107,28 +125,86 @@ def place_order_with_exit_at_50pct_profit(selected_contract, trade_client):
     )
     place_order_res = trade_client.submit_order(place_order_req)
 
-    filled_order = trade_client.get_order_by_id(place_order_res.id)
-    while filled_order.status.name != 'FILLED':
-        time.sleep(1)
-        filled_order = trade_client.get_order_by_id(place_order_res.id)
+    filled_order = wait_for_order_fill(place_order_res.id, trade_client)
+
+    if filled_order.status.name != 'FILLED':
+        print(f"Warning: Buy order for {selected_contract.symbol} not filled (Status: {filled_order.status.name}).")
+        return None
 
     actual_fill_price = float(filled_order.filled_avg_price)
-    target_price = round(actual_fill_price * 1.5, 2)
+    print(f"Order filled at: ${actual_fill_price}")
+    print(f"Setting {trail_percent}% trailing stop loss exit order...")
 
-    print(f"Order filled exactly at: ${actual_fill_price}")
-    print(f"Setting 50% profit exit target at: ${target_price}")
-
-    exit_request = LimitOrderRequest(
+    exit_request = TrailingStopOrderRequest(
         symbol=filled_order.symbol,
         qty=1,
         side=OrderSide.SELL,
-        limit_price=target_price,
+        trail_percent=trail_percent,
         time_in_force=TimeInForce.GTC,
     )
 
     exit_order = trade_client.submit_order(exit_request)
-    print("Take-profit limit order successfully placed and waiting!")
+    print("Trailing stop exit order successfully placed and active!")
     return exit_order
+
+
+def close_positions_nearing_expiration(symbol, trade_client, min_dte=90):
+    """
+    Inspects open option positions for symbol.
+    If Days To Expiration (DTE) < min_dte (default 90 days), cancels open orders and closes the position.
+    """
+    print(f"Checking for open option positions with DTE < {min_dte} days...")
+    all_positions = trade_client.get_all_positions()
+    today = datetime.now(tz=ZoneInfo("America/New_York")).date()
+
+    option_positions = [
+        pos for pos in all_positions
+        if pos.asset_class == AssetClass.US_OPTION and pos.symbol.startswith(symbol)
+    ]
+
+    closed_count = 0
+    for pos in option_positions:
+        dte = None
+        try:
+            contract = trade_client.get_option_contract(pos.symbol)
+            exp_date = contract.expiration_date
+            exp_dt = exp_date if hasattr(exp_date, "strftime") else datetime.strptime(str(exp_date), "%Y-%m-%d").date()
+            dte = (exp_dt - today).days
+        except Exception:
+            try:
+                import re
+                match = re.search(r'([0-9]{6})[CP]', pos.symbol)
+                if match:
+                    exp_dt = datetime.strptime("20" + match.group(1), "%Y%m%d").date()
+                    dte = (exp_dt - today).days
+            except Exception:
+                pass
+
+        if dte is not None and dte < min_dte:
+            print(f"Closing position {pos.symbol} (DTE = {dte} days < {min_dte} days) to prevent accelerated theta decay...")
+            try:
+                orders = trade_client.get_orders()
+                for order in orders:
+                    if order.symbol == pos.symbol:
+                        print(f"  Canceling open exit order {order.id} for {pos.symbol}...")
+                        trade_client.cancel_order_by_id(order.id)
+                
+                close_order = trade_client.close_position(pos.symbol)
+                print(f"Submitted close order for {pos.symbol} (ID: {close_order.id}). Waiting for fill...")
+
+                filled_order = wait_for_order_fill(close_order.id, trade_client)
+
+                if filled_order.status.name == 'FILLED':
+                    print(f"Successfully closed position {pos.symbol} at avg fill price: ${filled_order.filled_avg_price}.")
+                else:
+                    print(f"Close order status for {pos.symbol}: {filled_order.status.name}.")
+
+                closed_count += 1
+            except Exception as e:
+                print(f"Error closing position {pos.symbol}: {e}")
+
+    if closed_count == 0:
+        print(f"No option positions with DTE < {min_dte} days were found.")
 
 
 def get_all_option_positions(symbol, trade_client):
@@ -153,34 +229,42 @@ def get_all_option_positions(symbol, trade_client):
     return qqq_option_positions
 
 
+def tv_ema(series: pd.Series, period: int) -> pd.Series:
+    """TradingView standard Exponential Moving Average (EMA) with initial SMA seeding."""
+    ema = np.zeros_like(series, dtype=float)
+    ema[period - 1] = series.iloc[:period].mean()
+    multiplier = 2 / (period + 1)
+    for i in range(period, len(series)):
+        ema[i] = (series.iloc[i] - ema[i - 1]) * multiplier + ema[i - 1]
+    ema[:period - 1] = np.nan
+    return pd.Series(ema, index=series.index)
+
+
 def check_bullish_ema_crossover(symbol, data_client, fast_period=8, slow_period=21):
     """
-    Checks if a bullish EMA crossover occurred for the given symbol.
-    Returns True if today's fast_period EMA is > slow_period EMA while yesterday's fast_period EMA was < slow_period EMA.
+    Checks if a bullish EMA crossover occurred for the given symbol using split/dividend-adjusted daily bars.
+    Returns True if today's fast_period EMA > slow_period EMA while yesterday's fast_period EMA < slow_period EMA.
     """
-    start_date = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=120)
+    start_date = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=365)
     request_params = StockBarsRequest(
         symbol_or_symbols=[symbol],
         timeframe=TimeFrame.Day,
         start=start_date,
+        adjustment=Adjustment.ALL,
     )
     bars = data_client.get_stock_bars(request_params)
 
     df = bars.df
-    if isinstance(df.index, pd.MultiIndex):
-        close_series = df.loc[symbol]['close']
-    else:
-        close_series = df['close']
+    close_series = df.loc[symbol]['close'] if isinstance(df.index, pd.MultiIndex) else df['close']
 
-    ema_fast = close_series.ewm(span=fast_period, adjust=False).mean()
-    ema_slow = close_series.ewm(span=slow_period, adjust=False).mean()
+    ema_fast = tv_ema(close_series, fast_period)
+    ema_slow = tv_ema(close_series, slow_period)
 
     today_fast = float(ema_fast.iloc[-1])
     today_slow = float(ema_slow.iloc[-1])
     yesterday_fast = float(ema_fast.iloc[-2])
     yesterday_slow = float(ema_slow.iloc[-2])
 
-    # Bullish crossover: 9 EMA < 21 EMA yesterday AND 9 EMA > 21 EMA today
     crossover = (yesterday_fast < yesterday_slow) and (today_fast > today_slow)
 
     print(f"EMA Analysis for {symbol} ({fast_period} EMA vs {slow_period} EMA):")
@@ -190,3 +274,37 @@ def check_bullish_ema_crossover(symbol, data_client, fast_period=8, slow_period=
 
     return crossover
 
+
+def check_price_above_200sma(symbol, data_client, trend_period=200):
+    """
+    Macro Filter: Checks if the current close price of symbol is greater than its 200-day Simple Moving Average (SMA).
+    """
+    start_date = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=400)
+    request_params = StockBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame.Day,
+        start=start_date,
+        adjustment=Adjustment.ALL,
+    )
+    bars = data_client.get_stock_bars(request_params)
+
+    df = bars.df
+    close_series = df.loc[symbol]['close'] if isinstance(df.index, pd.MultiIndex) else df['close']
+
+    sma_200 = close_series.rolling(window=trend_period).mean()
+
+    today_price = float(close_series.iloc[-1])
+    today_200sma = float(sma_200.iloc[-1])
+
+    is_above = today_price > today_200sma
+
+    print(f"Macro Filter Analysis for {symbol} (Price vs {trend_period}-day SMA):")
+    print(f"  Today Close: ${today_price:.2f} | {trend_period} SMA: ${today_200sma:.2f}")
+    print(f"  Price > {trend_period} SMA: {is_above}")
+
+    return is_above
+
+
+# Backwards compatibility aliases
+select_high_interest_ATM_call_leap = select_high_interest_ITM_call_leap
+place_order_with_exit_at_50pct_profit = place_order_with_trailing_stop
