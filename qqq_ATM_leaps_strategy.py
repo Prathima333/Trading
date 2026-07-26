@@ -2,6 +2,7 @@
 """
 QQQ LEAPS Trading Strategy Main Execution Script.
 Uses Portfolio Allocation % (0%, <40%, <70%) to scale positions based on exact real-time option quotes.
+Enforces Macro Regime Filter: Price > 200 SMA AND 200 SMA Sloping Upward.
 """
 
 import nest_asyncio
@@ -63,15 +64,22 @@ if __name__ == "__main__":
         underlying_symbol, trade_client
     )
 
-    # Condition 1: 0% portfolio allocated to QQQ options
+    # Step 3: Check Macro Bullish Trend Regime (Price > 200 SMA AND 200 SMA Sloping Upward)
+    bullish_regime = check_price_above_200sma(underlying_symbol, data_client, trend_period=200, slope_lookback=20, require_upward_slope=True)
+
+    # Condition 1: Portfolio allocation < 30%
     if allocated_pct < 30.0:
-        print("0% portfolio allocated to QQQ options. Entering 1st ITM LEAP position (~30% portfolio equity)...")
-        selected_contract = select_high_interest_ITM_call_leap(
-            underlying_symbol, trade_client, data_client, itm_discount_pct=0.07
-        )
-        place_order_with_trailing_stop(
-            selected_contract, trade_client, option_data_client, target_pct=(30-allocated_pct)/100, trail_percent=15.0
-        )
+        if bullish_regime:
+            target_pct = (30.0 - allocated_pct) / 100.0
+            print(f"Allocation is {allocated_pct:.2f}% (< 30%). Bullish regime active! Entering ITM LEAP position (Target Budget: {target_pct*100:.1f}%)...")
+            selected_contract = select_high_interest_ITM_call_leap(
+                underlying_symbol, trade_client, data_client, itm_discount_pct=0.07
+            )
+            place_order_with_trailing_stop(
+                selected_contract, trade_client, option_data_client, target_pct=target_pct, trail_percent=15.0
+            )
+        else:
+            print(f"Allocation is {allocated_pct:.2f}% (< 30%), but Macro Bullish Regime is INACTIVE (Price <= 200 SMA or 200 SMA not sloping upward). Skipping entry.")
 
     # Condition 2: Portfolio allocation < 40%
     elif allocated_pct < 40.0:
@@ -80,10 +88,9 @@ if __name__ == "__main__":
         has_crossover = check_bullish_ema_crossover(
             underlying_symbol, data_client, fast_period=8, slow_period=21
         )
-        price_above_200sma = check_price_above_200sma(underlying_symbol, data_client)
 
-        if has_crossover and price_above_200sma:
-            print(f"Bullish 8/21 EMA crossover confirmed! Entering 2nd ITM LEAP position (~30% portfolio equity)...")
+        if has_crossover and bullish_regime:
+            print("Bullish 8/21 EMA crossover and Macro Bullish Regime confirmed! Entering 2nd ITM LEAP position (~30% portfolio equity)...")
             selected_contract = select_high_interest_ITM_call_leap(
                 underlying_symbol, trade_client, data_client, itm_discount_pct=0.07
             )
@@ -91,7 +98,7 @@ if __name__ == "__main__":
                 selected_contract, trade_client, option_data_client, target_pct=0.30, trail_percent=15.0
             )
         else:
-            print("No bullish 8/21 EMA crossover detected today. Not entering additional position.")
+            print("No bullish 8/21 EMA crossover or Macro Bullish Regime inactive. Not entering additional position.")
 
     # Condition 3: Portfolio allocation < 70%
     elif allocated_pct < 70.0:
@@ -100,10 +107,9 @@ if __name__ == "__main__":
         has_crossover = check_bullish_ema_crossover(
             underlying_symbol, data_client, fast_period=21, slow_period=200
         )
-        price_above_200sma = check_price_above_200sma(underlying_symbol, data_client)
 
-        if has_crossover and price_above_200sma:
-            print(f"Bullish 21/200 EMA crossover confirmed! Entering 3rd ITM LEAP position (~30% portfolio equity)...")
+        if has_crossover and bullish_regime:
+            print("Bullish 21/200 EMA crossover and Macro Bullish Regime confirmed! Entering 3rd ITM LEAP position (~30% portfolio equity)...")
             selected_contract = select_high_interest_ITM_call_leap(
                 underlying_symbol, trade_client, data_client, itm_discount_pct=0.07
             )
@@ -111,7 +117,7 @@ if __name__ == "__main__":
                 selected_contract, trade_client, option_data_client, target_pct=0.30, trail_percent=15.0
             )
         else:
-            print("No bullish 21/200 EMA crossover detected today. Not entering additional position.")
+            print("No bullish 21/200 EMA crossover or Macro Bullish Regime inactive. Not entering additional position.")
 
     # Condition 4: Portfolio allocation >= 70%
     else:  # allocated_pct >= 70.0

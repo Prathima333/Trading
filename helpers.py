@@ -321,11 +321,12 @@ def check_bullish_ema_crossover(symbol, data_client, fast_period=8, slow_period=
     return crossover
 
 
-def check_price_above_200sma(symbol, data_client, trend_period=200):
+def check_price_above_200sma(symbol, data_client, trend_period=200, slope_lookback=20, require_upward_slope=True):
     """
-    Macro Filter: Checks if the current close price of symbol is greater than its 200-day Simple Moving Average (SMA).
+    Macro Filter: Checks if the current close price of symbol is greater than its 200-day Simple Moving Average (SMA)
+    AND optionally enforces that the 200-day SMA is sloping upwards over the last slope_lookback days.
     """
-    start_date = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=400)
+    start_date = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=450)
     request_params = StockBarsRequest(
         symbol_or_symbols=[symbol],
         timeframe=TimeFrame.Day,
@@ -341,11 +342,19 @@ def check_price_above_200sma(symbol, data_client, trend_period=200):
 
     today_price = float(close_series.iloc[-1])
     today_200sma = float(sma_200.iloc[-1])
+    past_200sma = float(sma_200.iloc[-slope_lookback])
 
     is_above = today_price > today_200sma
+    is_sloping_up = today_200sma > past_200sma
 
-    print(f"Macro Filter Analysis for {symbol} (Price vs {trend_period}-day SMA):")
-    print(f"  Today Close: ${today_price:.2f} | {trend_period} SMA: ${today_200sma:.2f}")
-    print(f"  Price > {trend_period} SMA: {is_above}")
+    if require_upward_slope:
+        is_bullish_regime = is_above and is_sloping_up
+    else:
+        is_bullish_regime = is_above
 
-    return is_above
+    print(f"Macro Filter Analysis for {symbol} ({trend_period}-day SMA & Slope):")
+    print(f"  Today Close: ${today_price:.2f} | 200 SMA: ${today_200sma:.2f} | {slope_lookback}-Day Past SMA: ${past_200sma:.2f}")
+    print(f"  Price > 200 SMA: {is_above} | 200 SMA Sloping Up: {is_sloping_up}")
+    print(f"  Bullish Regime Active: {is_bullish_regime}")
+
+    return is_bullish_regime
